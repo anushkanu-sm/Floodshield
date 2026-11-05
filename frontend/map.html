@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>FloodShield</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body{margin:0;font-family:Arial,sans-serif;display:flex;height:100vh}
+  #side{width:340px;padding:14px;overflow:auto;background:#0f172a;color:#fff;box-sizing:border-box}
+  #map{flex:1}
+  h1{font-size:22px;margin:0}
+  .tag{color:#94a3b8;font-size:12px;margin-bottom:12px}
+  .box{background:#1e293b;border-radius:8px;padding:10px;margin-bottom:10px}
+  .box label{font-size:13px;display:block;margin-bottom:4px}
+  input[type=range],select{width:100%}
+  button{width:100%;padding:8px;border:0;border-radius:6px;background:#334155;color:#fff;cursor:pointer;margin-top:6px}
+  .item{border-left:6px solid #22c55e;background:#1e293b;border-radius:6px;padding:8px;margin-bottom:8px;font-size:13px}
+  .item b{font-size:14px}
+  .Watch{border-color:#f59e0b}.Critical{border-color:#ef4444}
+  .small{font-size:11px;color:#94a3b8}
+  #status{font-size:12px;color:#fca5a5}
+</style>
+</head>
+<body>
+<div id="side">
+  <h1>FloodShield</h1>
+  <div class="tag">From blocked drain to flood warning in seconds.</div>
+
+  <div class="box">
+    <label>Rainfall forecast: <b id="rainVal">0</b> mm</label>
+    <input type="range" id="rain" min="0" max="120" value="0"
+           oninput="document.getElementById('rainVal').textContent=this.value"
+           onchange="setRain(this.value)">
+  </div>
+
+  <div class="box">
+    <label>Sensor water level at:</label>
+    <select id="sensorSpot"></select>
+    <label style="margin-top:6px">Drain level: <b id="levelVal">0</b>%</label>
+    <input type="range" id="level" min="0" max="100" value="0"
+           oninput="document.getElementById('levelVal').textContent=this.value"
+           onchange="setSensor(this.value)">
+  </div>
+
+  <div class="box">
+    <div class="small">To report a blocked drain, click anywhere on the map.</div>
+    <button onclick="resetDemo()">Reset demo</button>
+  </div>
+
+  <div id="status"></div>
+  <div id="list"></div>
+</div>
+<div id="map"></div>
+
+<script>
+const API = "http://127.0.0.1:8000";
+const colors = {Safe:"#22c55e", Watch:"#f59e0b", Critical:"#ef4444"};
+const map = L.map("map").setView([12.9716, 77.5946], 11);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {maxZoom:19, attribution:"&copy; OpenStreetMap"}).addTo(map);
+
+const markers = {};
+let selectFilled = false;
+
+function popupHtml(h){
+  return "<b>" + h.name + "</b><br>Risk: " + h.risk_score + " (" + h.risk_level + ")<br>" +
+         "Why: " + h.reasons.join(", ");
+}
+
+async function refresh(){
+  try{
+    const r = await fetch(API + "/hotspots");
+    const d = await r.json();
+    document.getElementById("status").textContent = "";
+
+    if(!selectFilled){
+      const sel = document.getElementById("sensorSpot");
+      d.hotspots.forEach(h => {
+        const o = document.createElement("option");
+        o.value = h.id; o.textContent = h.name; sel.appendChild(o);
+      });
+      selectFilled = true;
+    }
+
+    let html = "";
+    d.hotspots.slice().sort((a,b) => b.risk_score - a.risk_score).forEach(h => {
+      const c = colors[h.risk_level];
+      if(!markers[h.id]){
+        markers[h.id] = L.circleMarker([h.lat, h.lon], {radius:14, color:"#fff", weight:2, fillOpacity:0.9})
+          .addTo(map).bindPopup(popupHtml(h));
+      }
+      markers[h.id].setStyle({fillColor:c});
+      markers[h.id].setPopupContent(popupHtml(h));
+      html += '<div class="item ' + h.risk_level + '"><b>' + h.name + '</b> - ' + h.risk_score +
+              ' ' + h.risk_level + '<br><span class="small">' + h.reasons.join(", ") + '</span></div>';
+    });
+    document.getElementById("list").innerHTML = html;
+  }catch(e){
+    document.getElementById("status").textContent = "Cannot reach the server. Is uvicorn running?";
+  }
+}
+
+async function post(path, body){
+  await fetch(API + path, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body || {})
+  });
+}
+
+async function setRain(v){ await post("/rain", {rain_mm:Number(v)}); refresh(); }
+
+async function setSensor(v){
+  const id = Number(document.getElementById("sensorSpot").value);
+  await post("/sensor", {hotspot_id:id, water_level:Number(v)});
+  refresh();
+}
+
+async function resetDemo(){
+  await post("/reset");
+  document.getElementById("rain").value = 0;
+  document.getElementById("rainVal").textContent = 0;
+  document.getElementById("level").value = 0;
+  document.getElementById("levelVal").textContent = 0;
+  refresh();
+}
+
+map.on("click", async e => {
+  if(confirm("Report a blocked drain at this spot?")){
+    await post("/reports", {lat:e.latlng.lat, lon:e.latlng.lng, type:"blocked_drain", note:"reported from map"});
+    refresh();
+  }
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
