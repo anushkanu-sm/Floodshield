@@ -15,7 +15,9 @@
   .box{background:#1e293b;border-radius:8px;padding:10px;margin-bottom:10px}
   .box label{font-size:13px;display:block;margin-bottom:4px}
   input[type=range],select{width:100%}
-  button{width:100%;padding:8px;border:0;border-radius:6px;background:#334155;color:#fff;cursor:pointer;margin-top:6px}
+ button{width:100%;padding:8px;border:0;border-radius:6px;background:#334155;color:#fff;cursor:pointer;margin-top:6px;transition:all .15s}
+ button:hover{background:#475569}
+ button:active{transform:scale(0.96);background:#2563eb}
   .item{border-left:6px solid #22c55e;background:#1e293b;border-radius:6px;padding:8px;margin-bottom:8px;font-size:13px}
   .item b{font-size:14px}
   .Watch{border-color:#f59e0b}.Critical{border-color:#ef4444}
@@ -31,21 +33,22 @@
   <div class="box">
     <label>Rainfall forecast: <b id="rainVal">0</b> mm</label>
     <input type="range" id="rain" min="0" max="120" value="0"
-           oninput="document.getElementById('rainVal').textContent=this.value"
-           onchange="setRain(this.value)">
+          oninput="document.getElementById('rainVal').textContent=this.value; setRainSoon(this.value)">
+          <button id="liveBtn" onclick="liveRain()">Use live forecast (Open-Meteo)</button>
   </div>
 
   <div class="box">
     <label>Sensor water level at:</label>
-    <select id="sensorSpot"></select>
+    <select id="sensorSpot" onchange="syncLevel()"></select>
     <label style="margin-top:6px">Drain level: <b id="levelVal">0</b>%</label>
     <input type="range" id="level" min="0" max="100" value="0"
-           oninput="document.getElementById('levelVal').textContent=this.value"
-           onchange="setSensor(this.value)">
+           oninput="document.getElementById('levelVal').textContent=this.value; setSensorSoon(this.value)">
   </div>
 
   <div class="box">
-    <div class="small">To report a blocked drain, click anywhere on the map.</div>
+    <div class="small">Report a blocked drain at the hotspot chosen above:</div>
+<button id="reportBtn" onclick="reportHere()">Report blocked drain</button>
+<div class="small" style="margin-top:6px">(You can also click the map.)</div>
     <button onclick="resetDemo()">Reset demo</button>
   </div>
 
@@ -68,11 +71,27 @@ function popupHtml(h){
   return "<b>" + h.name + "</b><br>Risk: " + h.risk_score + " (" + h.risk_level + ")<br>" +
          "Why: " + h.reasons.join(", ");
 }
-
+function syncLevel(){
+  const ls = document.getElementById("level");
+  if(document.activeElement === ls || !window.lastData) return;
+  const id = Number(document.getElementById("sensorSpot").value);
+  const h = window.lastData.hotspots.find(x => x.id === id);
+  if(h){
+    ls.value = h.water_level;
+    document.getElementById("levelVal").textContent = Math.round(h.water_level);
+  }
+}
 async function refresh(){
   try{
     const r = await fetch(API + "/hotspots");
     const d = await r.json();
+        window.lastData = d;
+    const rs = document.getElementById("rain");
+    if(document.activeElement !== rs){
+      rs.value = d.rain_mm;
+      document.getElementById("rainVal").textContent = Math.round(d.rain_mm*10)/10;
+    }
+    syncLevel();
     document.getElementById("status").textContent = "";
 
     if(!selectFilled){
@@ -110,14 +129,39 @@ async function post(path, body){
   });
 }
 
+let rainTimer, sensorTimer;
+function setRainSoon(v){ clearTimeout(rainTimer); rainTimer = setTimeout(() => setRain(v), 250); }
+function setSensorSoon(v){ clearTimeout(sensorTimer); sensorTimer = setTimeout(() => setSensor(v), 250); }
 async function setRain(v){ await post("/rain", {rain_mm:Number(v)}); refresh(); }
 
+async function liveRain(){
+     const r = await fetch(API + "/rain/live", {method:"POST"});
+     const d = await r.json();
+     if(d.rain_mm === null || d.rain_mm === undefined){ alert("Could not fetch live forecast"); return; }
+     refresh();
+   }
 async function setSensor(v){
   const id = Number(document.getElementById("sensorSpot").value);
   await post("/sensor", {hotspot_id:id, water_level:Number(v)});
   refresh();
 }
 
+async function reportHere(){
+  const id = Number(document.getElementById("sensorSpot").value);
+  const h = window.lastData.hotspots.find(x => x.id === id);
+  const b = document.getElementById("reportBtn");
+  b.disabled = true;
+  b.textContent = "Sending report...";
+  await post("/reports", {lat:h.lat, lon:h.lon, type:"blocked_drain", note:"reported from button"});
+  b.textContent = "Reported at " + h.name + " (" + (h.blocked_reports + 1) + ")";
+  b.style.background = "#15803d";
+  refresh();
+  setTimeout(() => {
+    b.disabled = false;
+    b.style.background = "";
+    b.textContent = "Report blocked drain";
+  }, 1500);
+}
 async function resetDemo(){
   await post("/reset");
   document.getElementById("rain").value = 0;
@@ -135,7 +179,7 @@ map.on("click", async e => {
 });
 
 refresh();
-setInterval(refresh, 3000);
+setInterval(refresh, 1500);
 </script>
 </body>
 </html>

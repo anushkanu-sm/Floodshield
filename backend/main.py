@@ -280,6 +280,29 @@ def set_rain(r: RainInput):
     conn.close()
     return {"rain_mm": r.rain_mm}
 
+@app.post("/rain/live")
+def live_rain():
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": 12.9716,
+                "longitude": 77.5946,
+                "daily": "precipitation_sum",
+                "forecast_days": 1,
+                "timezone": "Asia/Kolkata",
+            },
+            timeout=8,
+        )
+        mm = resp.json()["daily"]["precipitation_sum"][0] or 0
+    except Exception:
+        return {"rain_mm": None, "error": "could not reach forecast service"}
+    conn = get_db()
+    conn.execute("UPDATE settings SET value=? WHERE key='rain_mm'", (mm,))
+    conn.commit()
+    conn.close()
+    return {"rain_mm": mm, "source": "Open-Meteo forecast for today, Bengaluru"}
+
 
 @app.post("/reset")
 def reset_demo():
