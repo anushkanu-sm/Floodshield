@@ -1,5 +1,8 @@
+import os
 import sqlite3
 import math
+import requests
+from dotenv import load_dotenv
 from datetime import datetime
 from typing import Optional
 
@@ -16,6 +19,36 @@ app.add_middleware(
 )
 
 DB_FILE = "floodshield.db"
+load_dotenv()
+alerted = set()  # hotspots already alerted, so we only send once
+
+
+def send_telegram(text):
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": text},
+            timeout=5,
+        )
+    except Exception:
+        pass  # never let an alert failure break the app
+
+
+def check_alerts(hotspots):
+    for h in hotspots:
+        if h["risk_level"] == "Critical" and h["id"] not in alerted:
+            alerted.add(h["id"])
+            send_telegram(
+                f"FLOODSHIELD ALERT: CRITICAL flood risk at {h['name']} "
+                f"(score {h['risk_score']}). Reasons: {', '.join(h['reasons'])}. "
+                f"Avoid this area."
+            )
+        elif h["risk_level"] != "Critical" and h["id"] in alerted:
+            alerted.discard(h["id"])  # allow a new alert if it goes Critical again
 
 # name, lat, lon, low_elevation (0-1), drain_weakness (0-1), past_flooding (0 or 1)
 # Coordinates and ratings are approximate starter values: Person C should refine them.
@@ -174,8 +207,8 @@ def list_hotspots():
     rows = conn.execute("SELECT * FROM hotspots").fetchall()
     result = [build_hotspot(conn, r, rain) for r in rows]
     conn.close()
+    check_alerts(result)
     return {"rain_mm": rain, "hotspots": result}
-
 
 @app.get("/hotspots/{hotspot_id}")
 def one_hotspot(hotspot_id: int):
@@ -256,4 +289,5 @@ def reset_demo():
     conn.execute("UPDATE settings SET value=0 WHERE key='rain_mm'")
     conn.commit()
     conn.close()
+    alerted.clear()
     return {"status": "demo reset"}
