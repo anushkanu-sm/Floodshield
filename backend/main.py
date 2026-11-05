@@ -2,6 +2,9 @@ import os
 import sqlite3
 import math
 import requests
+from fastapi import UploadFile, File, Form
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import Optional
@@ -314,3 +317,45 @@ def reset_demo():
     conn.close()
     alerted.clear()
     return {"status": "demo reset"}
+
+@app.post("/analyze-photo")
+async def analyze_photo(
+    file: UploadFile = File(...),
+    lat: float = Form(...),
+    lon: float = Form(...),
+):
+    image_bytes = await file.read()
+    verdict = "unknown"
+    explanation = "AI check unavailable, report saved for manual review."
+    try:
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(
+                    data=image_bytes, mime_type=file.content_type or "image/jpeg"
+                ),
+                "You inspect photos for a city flood-warning system. "
+                "Reply with exactly one word first: BLOCKED if a drain or "
+                "culvert looks clogged with garbage or debris, WATERLOGGED if "
+                "there is standing water on a road, or CLEAR otherwise. "
+                "Then a dash and one short sentence explaining why.",
+            ],
+        )
+        text = (resp.text or "").strip()
+        print("GEMINI SAID:", repr(text))
+        first = text.split()[0].upper().strip("-:.,") if text else ""
+        if first in ("BLOCKED", "WATERLOGGED", "CLEAR"):
+            verdict = first.lower()
+            explanation = text
+    except Exception as e:
+        print("GEMINI ERROR:", e)
+
+    saved = False
+    linked = None
+    if verdict in ("blocked", "waterlogged", "unknown"):
+        report_type = "blocked_drain" if verdict in ("blocked", "unknown") else "waterlogging"
+        result = add_report(Report(lat=lat, lon=lon, type=report_type, note="photo: " + verdict))
+        saved = True
+        linked = result["linked_hotspot"]
+    return {"verdict": verdict, "explanation": explanation, "report_saved": saved, "linked_hotspot": linked}
