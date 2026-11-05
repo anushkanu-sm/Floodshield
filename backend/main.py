@@ -163,12 +163,19 @@ def compute_risk(h, rain_mm, blocked_count):
     return score, level, reasons
 
 
-def build_hotspot(conn, row, rain_mm):
+def build_hotspot(conn, row, rain_mm, extra=0.0, causes=None):
     blocked = conn.execute(
         "SELECT COUNT(*) FROM reports WHERE hotspot_id=? AND type='blocked_drain'",
         (row["id"],),
     ).fetchone()[0]
-    score, level, reasons = compute_risk(row, rain_mm, blocked)
+    score, level, reasons = compute_risk(row, rain_mm, blocked + extra)
+    reasons = [r for r in reasons if "blocked drain" not in r and "no major" not in r]
+    if blocked > 0:
+        reasons.insert(0, f"{blocked} blocked drain report(s) nearby")
+    if causes:
+        reasons.append("overflow from upstream blockage at " + ", ".join(causes))
+    if not reasons:
+        reasons.append("no major risk factors right now")
     return {
         "id": row["id"],
         "name": row["name"],
@@ -176,12 +183,50 @@ def build_hotspot(conn, row, rain_mm):
         "lon": row["lon"],
         "water_level": row["water_level"],
         "blocked_reports": blocked,
+        "network_extra": round(extra, 2),
         "risk_score": score,
         "risk_level": level,
         "reasons": reasons,
     }
 
+# Illustrative drainage network: hotspot id -> ids of downstream hotspots
+DOWNSTREAM = {
+    9: [8],   # Koramangala -> Madiwala
+    8: [1],   # Madiwala -> Silk Board
+    1: [2],   # Silk Board -> Bellandur
+    10: [2],  # Sarjapur Road -> Bellandur
+    6: [3],   # Yelahanka -> Hebbal
+    3: [5],   # Hebbal -> KR Puram
+    5: [4],   # KR Puram -> Mahadevapura
+    4: [7],   # Mahadevapura -> Marathahalli
+    7: [2],   # Marathahalli -> Bellandur
+}
 
+
+def network_effects(blocked_by_id, names):
+    extra = {i: 0.0 for i in blocked_by_id}
+    causes = {i: [] for i in blocked_by_id}
+    impacted = {i: [] for i in blocked_by_id}
+    for src, count in blocked_by_id.items():
+        if count == 0:
+            continue
+        frontier = [src]
+        seen = {src}
+        weight = 1.0
+        for _ in range(3):
+            weight *= 0.6
+            next_frontier = []
+            for node in frontier:
+                for d in DOWNSTREAM.get(node, []):
+                    if d in seen:
+                        continue
+                    seen.add(d)
+                    extra[d] += count * weight
+                    causes[d].append(names[src])
+                    impacted[src].append(names[d])
+                    next_frontier.append(d)
+            frontier = next_frontier
+    return extra, causes, impacted
 class Report(BaseModel):
     lat: float
     lon: float
@@ -208,10 +253,24 @@ def list_hotspots():
     conn = get_db()
     rain = get_rain(conn)
     rows = conn.execute("SELECT * FROM hotspots").fetchall()
-    result = [build_hotspot(conn, r, rain) for r in rows]
+    names = {r["id"]: r["name"] for r in rows}
+    blocked = {
+        r["id"]: conn.execute(
+            "SELECT COUNT(*) FROM reports WHERE hotspot_id=? AND type='blocked_drain'",
+            (r["id"],),
+        ).fetchone()[0]
+        for r in rows
+    }
+    extra, causes, impacted = network_effects(blocked, names)
+    result = []
+    for r in rows:
+        h = build_hotspot(conn, r, rain, extra[r["id"]], causes[r["id"]])
+        h["affected_downstream"] = impacted[r["id"]]
+        result.append(h)
     conn.close()
     check_alerts(result)
-    return {"rain_mm": rain, "hotspots": result}
+    edges = [[a, b] for a, targets in DOWNSTREAM.items() for b in targets]
+    return {"rain_mm": rain, "hotspots": result, "edges": edges}
 
 @app.get("/hotspots/{hotspot_id}")
 def one_hotspot(hotspot_id: int):
